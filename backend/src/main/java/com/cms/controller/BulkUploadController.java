@@ -1,0 +1,50 @@
+package com.cms.controller;
+
+import com.cms.dto.ApiResponse;
+import com.cms.dto.BulkUploadResultDTO;
+import com.cms.service.BulkUploadService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+@RestController
+@RequestMapping("/bulk-upload")
+@RequiredArgsConstructor
+@Slf4j
+@CrossOrigin(origins = "*")
+public class BulkUploadController {
+
+    private final BulkUploadService bulkUploadService;
+
+    @PostMapping("/customers")
+    public ResponseEntity<ApiResponse<BulkUploadResultDTO>> uploadCustomers(
+            @RequestParam("file") MultipartFile file) {
+
+        if (file.isEmpty()) {
+            return ResponseEntity.badRequest()
+                .body(ApiResponse.error("Uploaded file is empty"));
+        }
+
+        String filename = file.getOriginalFilename();
+        if (filename == null || (!filename.endsWith(".xlsx") && !filename.endsWith(".xls"))) {
+            return ResponseEntity.badRequest()
+                .body(ApiResponse.error("Only Excel files (.xlsx, .xls) are supported"));
+        }
+
+        try {
+            log.info("Processing bulk upload: {} ({} bytes)", filename, file.getSize());
+            BulkUploadResultDTO result = bulkUploadService.processBulkUpload(file);
+            String message = String.format(
+                "Upload complete: %d inserted, %d failed out of %d total rows",
+                result.getSuccessCount(), result.getFailureCount(), result.getTotalRows()
+            );
+            return ResponseEntity.ok(ApiResponse.success(message, result));
+        } catch (Exception e) {
+            log.error("Bulk upload failed", e);
+            return ResponseEntity.internalServerError()
+                .body(ApiResponse.error("Upload failed: " + e.getMessage()));
+        }
+    }
+}

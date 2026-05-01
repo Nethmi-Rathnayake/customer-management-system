@@ -1,0 +1,398 @@
+package com.cms.service;
+
+import com.cms.dto.BulkUploadResultDTO;
+import com.cms.dto.BulkUploadResultDTO.UploadErrorDTO;
+import com.cms.entity.*;
+import com.cms.repository.CityRepository;
+import com.cms.repository.CountryRepository;
+import com.cms.repository.CustomerRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.poi.openxml4j.opc.OPCPackage;
+import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.DateUtil;
+import org.apache.poi.xssf.eventusermodel.XSSFReader;
+import org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler;
+import org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler.SheetContentsHandler;
+import org.apache.poi.xssf.model.SharedStrings;
+import org.apache.poi.xssf.model.StylesTable;
+import org.apache.poi.xssf.usermodel.XSSFComment;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+import org.xml.sax.ContentHandler;
+import org.xml.sax.InputSource;
+import org.xml.sax.XMLReader;
+import org.xml.sax.helpers.XMLReaderFactory;
+
+import javax.transaction.Transactional;
+import java.io.InputStream;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * High-performance bulk upload service using:
+ * - POI SXSSF (Streaming) for memory-efficient Excel reading
+ * - JDBC batch inserts for DB performance
+ * - Row-level validation with error collection
+ */
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class BulkUploadService {
+
+    private static final int BATCH_SIZE = 500;
+    private static final DateTimeFormatter[] DATE_FORMATS = {
+        DateTimeFormatter.ofPattern("yyyy-MM-dd"),
+        DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+        DateTimeFormatter.ofPattern("MM/dd/yyyy"),
+        DateTimeFormatter.ofPattern("dd-MM-yyyy")
+    };
+
+    private final CustomerRepository customerRepository;
+    private final CityRepository cityRepository;
+    private final CountryRepository countryRepository;
+    private final JdbcTemplate jdbcTemplate;
+
+    /**
+     * Process bulk upload using SAX-based streaming to handle up to 1M rows with low memory.
+     */
+    public BulkUploadResultDTO processBulkUpload(MultipartFile file) throws Exception {
+        long startTime = System.currentTimeMillis();
+        log.info("Starting bulk upload: {}", file.getOriginalFilename());
+
+        BulkUploadResultDTO result = new BulkUploadResultDTO();
+        List<UploadErrorDTO> errors = new ArrayList<>();
+
+        // Pre-load existing NIC numbers to avoid per-row DB checks
+        Set<String> existingNics = new HashSet<>(
+            jdbcTemplate.queryForList("SELECT nic_number FROM customers", String.class)
+        );
+
+        // Pre-load master data maps for lookup
+        Map<String, Long> cityMap = buildCityMap();
+        Map<String, Long> countryMap = buildCountryMap();
+
+        // Use streaming SAX parser for low memory usage
+        try (InputStream is = file.getInputStream();
+             OPCPackage pkg = OPCPackage.open(is)) {
+
+            XSSFReader reader = new XSSFReader(pkg);
+            SharedStrings sst = reader.getSharedStringsTable();
+            StylesTable styles = reader.getStylesTable();
+
+            StreamingSheetHandler handler = new StreamingSheetHandler(
+                existingNics, cityMap, countryMap, errors, result
+            );
+
+            XMLReader parser = XMLReaderFactory.createXMLReader();
+            ContentHandler contentHandler = new XSSFSheetXMLHandler(styles, sst, handler, false);
+            parser.setContentHandler(contentHandler);
+
+            XSSFReader.SheetIterator sheets = (XSSFReader.SheetIterator) reader.getSheetsData();
+            if (sheets.hasNext()) {
+                try (InputStream sheetStream = sheets.next()) {
+                    parser.parse(new InputSource(sheetStream));
+                }
+            }
+
+            // Flush remaining batch
+            handler.flushBatch();
+        }
+
+        result.setProcessingTimeMs(System.currentTimeMillis() - startTime);
+        result.setTotalRows(result.getSuccessCount() + result.getFailureCount());
+        result.setErrors(errors.size() > 1000 ? errors.subList(0, 1000) : errors); // cap error list
+
+        String status;
+        if (result.getFailureCount() == 0) {
+            status = "COMPLETED";
+        } else if (result.getSuccessCount() > 0) {
+            status = "PARTIAL";
+        } else {
+            status = "FAILED";
+        }
+        result.setStatus(status);
+
+        log.info("Bulk upload complete: {} success, {} failed, {}ms",
+            result.getSuccessCount(), result.getFailureCount(), result.getProcessingTimeMs());
+
+        return result;
+    }
+
+    private Map<String, Long> buildCityMap() {
+        Map<String, Long> map = new HashMap<>();
+        jdbcTemplate.query("SELECT id, LOWER(name) as name FROM cities",
+            rs -> map.put(rs.getString("name"), rs.getLong("id")));
+        return map;
+    }
+
+    private Map<String, Long> buildCountryMap() {
+        Map<String, Long> map = new HashMap<>();
+        jdbcTemplate.query("SELECT id, LOWER(name) as name FROM countries",
+            rs -> map.put(rs.getString("name"), rs.getLong("id")));
+        return map;
+    }
+
+    /**
+     * SAX-based sheet handler. Collects data row by row and batch inserts.
+     *
+     * Expected Excel columns (1-indexed):
+     * 1: Name, 2: Date of Birth, 3: NIC Number,
+     * 4: Mobile Numbers (comma-separated),
+     * 5: Address Line 1, 6: Address Line 2, 7: City, 8: Country
+     */
+    private class StreamingSheetHandler implements SheetContentsHandler {
+
+        private final Set<String> existingNics;
+        private final Map<String, Long> cityMap;
+        private final Map<String, Long> countryMap;
+        private final List<UploadErrorDTO> errors;
+        private final BulkUploadResultDTO result;
+
+        private final List<Object[]> customerBatch = new ArrayList<>();
+        private final AtomicInteger rowCounter = new AtomicInteger(0);
+        private final Map<String, Object[]> pendingRow = new LinkedHashMap<>();
+        private String[] currentRow;
+        private int currentRowNum = -1;
+        private boolean isHeaderRow = true;
+        private final Set<String> batchNics = new HashSet<>();
+
+        StreamingSheetHandler(Set<String> existingNics, Map<String, Long> cityMap,
+                               Map<String, Long> countryMap, List<UploadErrorDTO> errors,
+                               BulkUploadResultDTO result) {
+            this.existingNics = existingNics;
+            this.cityMap = cityMap;
+            this.countryMap = countryMap;
+            this.errors = errors;
+            this.result = result;
+        }
+
+        @Override
+        public void startRow(int rowNum) {
+            currentRowNum = rowNum;
+            currentRow = new String[10];
+        }
+
+        @Override
+        public void endRow(int rowNum) {
+            if (isHeaderRow) {
+                isHeaderRow = false;
+                return;
+            }
+
+            int rowNum1Based = rowNum + 1;
+            String name = getCell(0);
+            String dob = getCell(1);
+            String nic = getCell(2);
+            String mobiles = getCell(3);
+            String addr1 = getCell(4);
+            String addr2 = getCell(5);
+            String city = getCell(6);
+            String country = getCell(7);
+
+            // Skip fully empty rows
+            if (isAllEmpty(name, dob, nic)) {
+                return;
+            }
+
+            // Validate mandatory fields
+            List<String> validationErrors = new ArrayList<>();
+            if (name == null || name.trim().isEmpty()) {
+                validationErrors.add("Name is mandatory");
+            }
+            if (dob == null || dob.trim().isEmpty()) {
+                validationErrors.add("Date of Birth is mandatory");
+            }
+            if (nic == null || nic.trim().isEmpty()) {
+                validationErrors.add("NIC Number is mandatory");
+            }
+
+            if (!validationErrors.isEmpty()) {
+                errors.add(new UploadErrorDTO(rowNum1Based, nic, String.join("; ", validationErrors)));
+                result.setFailureCount(result.getFailureCount() + 1);
+                return;
+            }
+
+            nic = nic.trim();
+
+            // Check duplicate NIC
+            if (existingNics.contains(nic) || batchNics.contains(nic)) {
+                errors.add(new UploadErrorDTO(rowNum1Based, nic, "Duplicate NIC number: " + nic));
+                result.setFailureCount(result.getFailureCount() + 1);
+                return;
+            }
+
+            // Parse date
+            LocalDate dateOfBirth = parseDate(dob.trim());
+            if (dateOfBirth == null) {
+                errors.add(new UploadErrorDTO(rowNum1Based, nic, "Invalid date format: " + dob));
+                result.setFailureCount(result.getFailureCount() + 1);
+                return;
+            }
+
+            // Resolve city and country IDs
+            Long cityId = city != null && !city.trim().isEmpty()
+                ? cityMap.get(city.trim().toLowerCase()) : null;
+            Long countryId = country != null && !country.trim().isEmpty()
+                ? countryMap.get(country.trim().toLowerCase()) : null;
+
+            batchNics.add(nic);
+            customerBatch.add(new Object[]{
+                name.trim(), dateOfBirth, nic,
+                mobiles, addr1, addr2, cityId, countryId,
+                rowNum1Based
+            });
+
+            if (customerBatch.size() >= BATCH_SIZE) {
+                flushBatch();
+            }
+        }
+
+        void flushBatch() {
+            if (customerBatch.isEmpty()) return;
+
+            try {
+                // Insert customers
+                jdbcTemplate.batchUpdate(
+                    "INSERT INTO customers (name, date_of_birth, nic_number) VALUES (?, ?, ?)",
+                    customerBatch,
+                    customerBatch.size(),
+                    (ps, row) -> {
+                        ps.setString(1, (String) row[0]);
+                        ps.setObject(2, row[1]);
+                        ps.setString(3, (String) row[2]);
+                    }
+                );
+
+                // Fetch inserted IDs by NIC
+                List<String> nics = new ArrayList<>();
+                for (Object[] row : customerBatch) {
+                    nics.add((String) row[2]);
+                }
+
+                Map<String, Long> nicToId = new HashMap<>();
+                String inClause = String.join(",", Collections.nCopies(nics.size(), "?"));
+                jdbcTemplate.query(
+                    "SELECT id, nic_number FROM customers WHERE nic_number IN (" + inClause + ")",
+                    nics.toArray(),
+                    rs -> nicToId.put(rs.getString("nic_number"), rs.getLong("id"))
+                );
+
+                // Insert mobile numbers and addresses
+                List<Object[]> mobileBatch = new ArrayList<>();
+                List<Object[]> addressBatch = new ArrayList<>();
+
+                for (Object[] row : customerBatch) {
+                    String nic = (String) row[2];
+                    Long customerId = nicToId.get(nic);
+                    if (customerId == null) continue;
+
+                    String mobiles = (String) row[3];
+                    if (mobiles != null && !mobiles.trim().isEmpty()) {
+                        for (String mobile : mobiles.split(",")) {
+                            String m = mobile.trim();
+                            if (!m.isEmpty()) {
+                                mobileBatch.add(new Object[]{customerId, m});
+                            }
+                        }
+                    }
+
+                    String addr1 = (String) row[4];
+                    String addr2 = (String) row[5];
+                    Long cityId = (Long) row[6];
+                    Long countryId = (Long) row[7];
+
+                    if ((addr1 != null && !addr1.trim().isEmpty()) || cityId != null || countryId != null) {
+                        addressBatch.add(new Object[]{customerId, addr1, addr2, cityId, countryId});
+                    }
+                }
+
+                if (!mobileBatch.isEmpty()) {
+                    jdbcTemplate.batchUpdate(
+                        "INSERT INTO mobile_numbers (customer_id, number) VALUES (?, ?)",
+                        mobileBatch
+                    );
+                }
+
+                if (!addressBatch.isEmpty()) {
+                    jdbcTemplate.batchUpdate(
+                        "INSERT INTO addresses (customer_id, address_line1, address_line2, city_id, country_id) " +
+                        "VALUES (?, ?, ?, ?, ?)",
+                        addressBatch
+                    );
+                }
+
+                // Track newly inserted NICs so duplicates within same file are caught
+                existingNics.addAll(nics);
+                result.setSuccessCount(result.getSuccessCount() + customerBatch.size());
+                log.debug("Flushed batch of {} customers", customerBatch.size());
+
+            } catch (Exception e) {
+                log.error("Batch insert error", e);
+                // Mark all in batch as failed
+                for (Object[] row : customerBatch) {
+                    int rowNum = (int) row[8];
+                    String nic = (String) row[2];
+                    errors.add(new UploadErrorDTO(rowNum, nic, "DB error: " + e.getMessage()));
+                    result.setFailureCount(result.getFailureCount() + 1);
+                }
+            } finally {
+                customerBatch.clear();
+                batchNics.clear();
+            }
+        }
+
+        @Override
+        public void cell(String cellReference, String formattedValue, XSSFComment comment) {
+            if (cellReference == null || formattedValue == null) return;
+            int col = cellRefToColIndex(cellReference);
+            if (col >= 0 && col < 10) {
+                currentRow[col] = formattedValue;
+            }
+        }
+
+        @Override
+        public void headerFooter(String text, boolean isHeader, String tagName) {}
+
+        private String getCell(int col) {
+            return (currentRow != null && col < currentRow.length) ? currentRow[col] : null;
+        }
+
+        private boolean isAllEmpty(String... values) {
+            for (String v : values) {
+                if (v != null && !v.trim().isEmpty()) return false;
+            }
+            return true;
+        }
+
+        private int cellRefToColIndex(String ref) {
+            int col = 0;
+            for (int i = 0; i < ref.length(); i++) {
+                char c = ref.charAt(i);
+                if (Character.isDigit(c)) break;
+                col = col * 26 + (c - 'A' + 1);
+            }
+            return col - 1;
+        }
+    }
+
+    private LocalDate parseDate(String dateStr) {
+        if (dateStr == null || dateStr.trim().isEmpty()) return null;
+        // Handle Excel numeric date serial
+        try {
+            double serial = Double.parseDouble(dateStr);
+            return DateUtil.getLocalDateTime(serial).toLocalDate();
+        } catch (NumberFormatException ignored) {}
+
+        for (DateTimeFormatter fmt : DATE_FORMATS) {
+            try {
+                return LocalDate.parse(dateStr.trim(), fmt);
+            } catch (DateTimeParseException ignored) {}
+        }
+        return null;
+    }
+}
