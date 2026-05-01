@@ -56,29 +56,28 @@ Testing: JUnit / Jest
 
 ## 📁 Project Structure
 
+```
 customer-management-system/
-
+│
 ├── backend/
-│   ├── controller/
-│   ├── service/
-│   ├── repository/
-│   ├── entity/
-│   ├── dto/
-│   ├── config/
-│   └── exception/
+│   ├── controller/      # REST APIs
+│   ├── service/         # Business logic
+│   ├── repository/      # Database layer
+│   ├── entity/          # JPA entities
+│   ├── dto/             # Data transfer objects
+│   ├── config/          # Configurations
+│   └── exception/       # Global exception handling
 │
 ├── frontend/
-│   ├── components/
-│   ├── pages/
-│   ├── services/
-│   └── styles/
+│   ├── components/      # Reusable UI components
+│   ├── pages/           # Application pages
+│   ├── services/        # Axios API calls
+│   └── styles/          # CSS files
 │
 └── database/
     ├── ddl.sql
     └── dml.sql
-
----
-
+```
 ## 🚀 Getting Started
 
 ### Prerequisites
