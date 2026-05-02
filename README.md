@@ -179,31 +179,47 @@ Bulk upload issues:
 ---
 ## 📸 Screenshots
 
-### 🏠 Home Page
-![Home Page 1](screenshots/home page (4).png)
-![Home Page 2](screenshots/home page (3).png)
-![Home Page 3](screenshots/home page (2).png)
-![Home Page 4](screenshots/home page (1).png)
-![Home Page 1](screenshots/home page.png)
-### 📊 Dashboard
-![Dashboard](screenshots/dashbord(recent customers).png)
+---
+
+## 🏠 Home Page
+
+![Home Page 1](screenshots/home%20page%20(4).png)
+
+![Home Page 2](screenshots/home%20page%20(3).png)
+
+![Home Page 3](screenshots/home%20page%20(2).png)
+
+![Home Page 4](screenshots/home%20page%20(1).png)
+
+![Home Page 5](screenshots/home%20page.png)
+
+---
+
+## 📊 Dashboard
+
+![Dashboard](screenshots/dashbord(recent%20customers).png)
+
+---
 
 ## 👤 Customer Management
 
 ### ➕ Add New Customer
-![Add Customer](screenshots/add a new customer.png)
+![Add Customer](screenshots/add%20a%20new%20customer.png)
 
 ### 👤 Customer Details
-![Customer Details](screenshots/customer details (1).png)
-![Customer Details](screenshots/customer details.png)
+![Customer Details](screenshots/customer%20details%20(1).png)
 
+![Customer Details](screenshots/customer%20details.png)
 
-### ❌ Duplicate NIC Validation Error
-![Duplicate NIC Error](screenshots/bulk upload fails with duplicate nic numbers.png)
+---
 
-### ✅ Successful Upload (Unique NIC)
-![Successful Upload](screenshots/bulk upload.png)
+## ❌ Duplicate NIC Error
+![Duplicate NIC Error](screenshots/bulk%20upload%20fails%20with%20duplicate%20nic%20numbers.png)
 
+---
+
+## ✅ Successful Upload
+![Successful Upload](screenshots/bulk%20upload.png)
 ## 👨‍💻 Author
 
 Nethmi Rathnayake
