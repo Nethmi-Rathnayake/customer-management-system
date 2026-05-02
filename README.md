@@ -177,6 +177,32 @@ Bulk upload issues:
 - Max size: 200MB  
 
 ---
+## 📸 Screenshots
+
+### 🏠 Home Page
+![Home Page 1](screenshots/home page (4).png)
+![Home Page 2](screenshots/home page (3).png)
+![Home Page 3](screenshots/home page (2).png)
+![Home Page 4](screenshots/home page (1).png)
+![Home Page 1](screenshots/home page.png)
+### 📊 Dashboard
+![Dashboard](screenshots/dashbord(recent customers).png)
+
+## 👤 Customer Management
+
+### ➕ Add New Customer
+![Add Customer](screenshots/add a new customer.png)
+
+### 👤 Customer Details
+![Customer Details](screenshots/customer details (1).png)
+![Customer Details](screenshots/customer details.png)
+
+
+### ❌ Duplicate NIC Validation Error
+![Duplicate NIC Error](screenshots/bulk upload fails with duplicate nic numbers.png)
+
+### ✅ Successful Upload (Unique NIC)
+![Successful Upload](screenshots/bulk upload.png)
 
 ## 👨‍💻 Author
 
